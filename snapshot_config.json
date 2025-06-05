@@ -1,0 +1,19 @@
+{
+    "janus": {
+        "server": "127.0.0.1",
+        "port": 8188,
+        "use_ssl": false,
+        "websocket_path": "/"
+    },
+    "snapshots": {
+        "save_to_server": true,
+        "save_to_browser": true,
+        "image_quality": 0.95,
+        "image_format": "jpeg"
+    },
+    "ui": {
+        "auto_connect": true,
+        "show_fisheye_correction": true,
+        "demo_mode": false
+    }
+}
