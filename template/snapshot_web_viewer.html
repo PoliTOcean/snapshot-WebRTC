@@ -490,34 +490,26 @@
             const saveToServer = !appConfig || !appConfig.snapshots || appConfig.snapshots.save_to_server !== false;
             const saveToBrowser = !appConfig || !appConfig.snapshots || appConfig.snapshots.save_to_browser !== false;
             
-            // Get camera IDs to capture
-            let cameraIds = [];
-            if (appConfig && appConfig.ui && appConfig.ui.demo_mode) {
-                cameraIds = [1, 2, 3, 4, 5]; // Demo mode cameras
-            } else {
-                cameraIds = Object.keys(activeStreams); // Real Janus streams
-            }
-            
+            let cameraIds = Object.keys(activeStreams); // Real Janus streams
+
+
             // Capture all cameras simultaneously
             cameraIds.forEach(streamId => {
-                let imageData = null;
-                
-                // Check if in demo mode
-                if (appConfig && appConfig.ui && appConfig.ui.demo_mode) {
-                    imageData = captureDemoSnapshot(streamId, imageFormat, imageQuality);
-                } else {
-                    const video = document.getElementById(`video_${streamId}`);
-                    if (video && video.videoWidth && video.videoHeight) {
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        
-                        canvas.width = video.videoWidth;
-                        canvas.height = video.videoHeight;
-                        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                        
-                        imageData = canvas.toDataURL(`image/${imageFormat}`, imageQuality);
-                    }
+                let imageData = null;                
+
+                const video = document.getElementById(`video_${streamId}`);
+                if (video && video.videoWidth && video.videoHeight) {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    
+                    imageData = canvas.toDataURL(`image/${imageFormat}`, imageQuality);
+                    
                 }
+            
                 
                 if (imageData) {
                     snapshots.push({
@@ -525,37 +517,96 @@
                         image_data: imageData,
                         camera_name: `Camera ${streamId}`
                     });
-                }
+                }                
+
             });
             
-            if (saveToServer) {
-                // Send all snapshots in one request
-                fetch('/api/save_multiple_snapshots', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        snapshots: snapshots
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        updateConnectionStatus(`All camera snapshots completed (${data.saved_count} saved, ${data.error_count} errors)`, "success");
-                    } else {
-                        updateConnectionStatus("Error taking snapshots from all cameras", "error");
-                    }
-                })
-                .catch(error => {
-                    updateConnectionStatus("Error taking snapshots from all cameras", "error");
-                    console.error(error);
-                });
-            }
+            snapshots.forEach(snapshot => {
+                const link = document.createElement('a');
+                link.href = snapshot.image_data;
+                link.download = `camera_${snapshot.stream_id}_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+                link.style.display = 'none';
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            });
             
-            if (saveToBrowser) {
-                // Trigger browser downloads
-                snapshots.forEach(snapshot => {
+            return snapshots;
+            
+        }
+
+        function captureSnapshot(streamId, cameraName) {
+            return new Promise((resolve, reject) => {
+                let imageData = null;
+                
+                const video = document.getElementById(`video_${streamId}`);
+                
+                if (!video || !video.videoWidth || !video.videoHeight) {
+                    console.error(`Video not ready for camera ${streamId}`);
+                    reject(new Error(`Video not ready for ${cameraName}`));
+                    return;
+                }
+
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                const imageQuality = (appConfig && appConfig.snapshots && appConfig.snapshots.image_quality) || 0.9;
+                const imageFormat = (appConfig && appConfig.snapshots && appConfig.snapshots.image_format) || 'jpeg';
+                
+                imageData = canvas.toDataURL(`image/${imageFormat}`, imageQuality);
+        
+                
+                if (!imageData) {
+                    reject(new Error(`Failed to capture snapshot for ${cameraName}`));
+                    return;
+                }
+
+                const base64Data = imageData.split(',')[1]; 
+
+
+
+                const link = document.createElement('a');
+                link.href = imageData;
+                link.download = `camera_${streamId}_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+                link.style.display = 'none';
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+        
+
+                resolve(base64Data);
+            });
+        }
+
+        function takeSnapshotsSimultaneously() {
+            const streamIds = [1, 2]; 
+
+            const snapshotPromises = streamIds.map(streamId => {
+                const cameraName = `Camera ${streamId}`;
+                return captureSnapshot(streamId, cameraName)
+                    .then(base64Data => ({
+                        stream_id: streamId,
+                        image_data: `data:image/jpeg;base64,${base64Data}`,
+                        camera_name: cameraName
+                    }))
+                    .catch(error => {
+                        console.error(`Failed to capture snapshot from ${cameraName}:`, error);
+                        return null; 
+                    });
+            });
+
+            return Promise.all(snapshotPromises).then(results => {
+                const validSnapshots = results.filter(r => r !== null);
+
+                validSnapshots.forEach(snapshot => {
                     const link = document.createElement('a');
                     link.href = snapshot.image_data;
                     link.download = `camera_${snapshot.stream_id}_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
@@ -565,55 +616,12 @@
                     link.click();
                     document.body.removeChild(link);
                 });
-                
-                if (!saveToServer) {
-                    updateConnectionStatus(`All camera snapshots downloaded (${snapshots.length} images)`, "success");
-                }
-            }
-        }
 
-        function captureSnapshot(streamId, cameraName) {
-            return new Promise((resolve, reject) => {
-                let imageData = null;
-                
-                if (appConfig && appConfig.ui && appConfig.ui.demo_mode) {
-                    const imageQuality = (appConfig && appConfig.snapshots && appConfig.snapshots.image_quality) || 0.9;
-                    const imageFormat = (appConfig && appConfig.snapshots && appConfig.snapshots.image_format) || 'jpeg';
-                    imageData = captureDemoSnapshot(streamId, imageFormat, imageQuality);
-                } else {
-                    const video = document.getElementById(`video_${streamId}`);
-                    
-                    if (!video || !video.videoWidth || !video.videoHeight) {
-                        console.error(`Video not ready for camera ${streamId}`);
-                        reject(new Error(`Video not ready for ${cameraName}`));
-                        return;
-                    }
-
-                    const canvas = document.createElement('canvas');
-                    const ctx = canvas.getContext('2d');
-                    
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    
-                    const imageQuality = (appConfig && appConfig.snapshots && appConfig.snapshots.image_quality) || 0.9;
-                    const imageFormat = (appConfig && appConfig.snapshots && appConfig.snapshots.image_format) || 'jpeg';
-                    
-                    imageData = canvas.toDataURL(`image/${imageFormat}`, imageQuality);
-                }
-                
-                if (!imageData) {
-                    reject(new Error(`Failed to capture snapshot for ${cameraName}`));
-                    return;
-                }
-
-                // Estraggo solo la parte base64, tolgo il prefisso
-                const base64Data = imageData.split(',')[1]; 
-
-                resolve(base64Data);
+                console.log("Snapshots complete:", validSnapshots);
+                return validSnapshots;
             });
         }
+
 
         function handleConnect() {
             if (appConfig && appConfig.ui && appConfig.ui.demo_mode) {
@@ -633,7 +641,9 @@
         
         // Socket IO
         const socket = io("http://localhost:5001",  {
-               transports: ["websocket"]
+            transports: ["websocket"],
+            upgrade: false,
+            
         });
 
         socket.on("connect", () => {
@@ -649,7 +659,6 @@
         });
         
         
-
         socket.on('take_snapshot', async (data) => {
             const cameraId = data.id;
             console.log('Ricevuto take_snapshot per camera:', cameraId);
@@ -660,6 +669,33 @@
                 id: cameraId,
                 image: base64Image
             });
+        });
+
+
+        socket.on('take_all_snapshot', async () => {
+            console.log('Ricevuto take_all_snapshot');
+
+            let base64Images = await takeSnapshotAllCameras();
+
+            socket.emit('snapshots_all_response', {
+                data: base64Images
+            });
+        });
+
+
+        socket.on('take_stereo_snapshot', async () => {
+            console.log('Ricevuto take_stereo_snapshot');
+
+            let base64Images = await takeSnapshotsSimultaneously();
+
+            socket.emit('snapshots_stereo_response', {
+                data: base64Images
+            });
+        });
+
+
+        socket.on('disconnect', (reason) => {
+            console.warn('🔌 Socket disconnected:', reason);
         });
 
     </script>

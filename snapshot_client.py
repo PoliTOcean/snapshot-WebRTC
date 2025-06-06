@@ -25,6 +25,10 @@ from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 import base64
 from datetime import datetime
+import io
+from PIL import Image
+from datetime import datetime
+from pathlib import Path
 
 
 class SnapshotError(Exception):
@@ -97,7 +101,7 @@ class SnapshotClient:
             result = response.json()
             
             if (result):
-                self._save_locally(result['image'], camera_id, local_path)
+                self._save_locally(result['image'], camera_id, "single")
             
             return result
             
@@ -105,109 +109,125 @@ class SnapshotClient:
             raise SnapshotError(f"Failed to take snapshot from camera {camera_id}: {e}")
 
     
-    def take_multiple_snapshots(self, camera_ids: List[int], save_locally: bool = False, 
-                               local_path: Optional[str] = None) -> Dict[str, Any]:
+    def take_all_snapshots(self, save_locally: bool = True, local_path: Optional[str] = None) -> Dict[int, str]:
         """
-        Take synchronized snapshots from multiple cameras.
-        
-        This method ensures all snapshots are taken at the exact same moment.
-        
+        Take snapshots from all cameras via /api/snapshot_all.
+
         Args:
-            camera_ids: List of camera IDs to capture from
             save_locally: Whether to save images locally
-            local_path: Custom local path to save images
-            
+            local_path: Custom local path to save the images
+
         Returns:
-            Dictionary containing all snapshot results
+            Dictionary mapping camera_id -> base64 image string
         """
         try:
-            response = self.session.post(
-                f"{self.server_url}/api/test_multiple_snapshots",
-                json={"camera_ids": camera_ids},
+            response = self.session.get(
+                f"{self.server_url}/api/snapshot_all",
                 timeout=self.timeout
             )
             response.raise_for_status()
             result = response.json()
-            
-            if save_locally and result.get('success'):
-                for camera_id in camera_ids:
-                    if str(camera_id) in result.get('snapshots', {}):
-                        self._save_locally(result['snapshots'][str(camera_id)], camera_id, local_path)
-            
-            return result
-            
+
+            images =  result.get('images', {}).get('data', [])
+
+            snapshots = {}
+
+            for image_info in images:
+                camera_id_str = image_info["stream_id"]
+                image_data = image_info["image_data"]
+                if camera_id_str is None or image_data is None:
+                    continue  # skip invalid entries
+                try:
+                    camera_id = int(camera_id_str)
+                    if save_locally:
+                        self._save_locally(image_data, camera_id, "all")
+                    snapshots[camera_id] = image_data
+                except (ValueError, TypeError):
+                    continue  # skip malformed IDs
+
+            return snapshots
+
         except requests.RequestException as e:
-            raise SnapshotError(f"Failed to take multiple snapshots: {e}")
+            raise SnapshotError(f"Failed to take all snapshots: {e}")
+
     
-    def take_all_snapshots(self, save_locally: bool = False, 
-                          local_path: Optional[str] = None) -> Dict[str, Any]:
+    def take_snapshot_stereo(self, save_locally: bool = True, local_path: Optional[str] = None) -> Dict[int, dict]:
         """
-        Take synchronized snapshots from all available cameras.
-        
+        Take a stereo snapshot (camera 1 and 2 simultaneously) via /api/snapshot_stereo.
+
         Args:
-            save_locally: Whether to save images locally
-            local_path: Custom local path to save images
-            
+            save_locally: Whether to save the images locally
+            local_path: Optional path to save the images
+
         Returns:
-            Dictionary containing snapshot results from all cameras
+            Dictionary mapping camera ID -> snapshot data
         """
-        camera_ids = self.get_available_cameras()
-        return self.take_multiple_snapshots(camera_ids, save_locally, local_path)
-    
-    def take_burst_snapshots(self, camera_ids: List[int], count: int = 3, 
-                           interval: float = 0.5, save_locally: bool = False,
-                           local_path: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Take a burst of synchronized snapshots over time.
-        
-        Args:
-            camera_ids: List of camera IDs to capture from
-            count: Number of snapshots to take
-            interval: Time interval between snapshots in seconds
-            save_locally: Whether to save images locally
-            local_path: Custom local path to save images
-            
-        Returns:
-            List of snapshot results
-        """
-        results = []
-        for i in range(count):
-            if i > 0:
-                time.sleep(interval)
-            result = self.take_multiple_snapshots(camera_ids, save_locally, local_path)
-            results.append(result)
-        return results
-    
-    def _save_locally(self, snapshot_data: str, camera_id: int, 
-                     local_path: Optional[str] = None):
-        """Save snapshot data locally."""
+        try:
+            response = self.session.get(
+                f"{self.server_url}/api/snapshot_stereo",
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            images = result.get("images", {}).get("data", {})
+
+            snapshots = {}
+
+            for image_info in images:
+                camera_id_str = image_info["stream_id"]
+                image_data = image_info["image_data"]
+                if camera_id_str is None or image_data is None:
+                    continue  # skip invalid entries
+                try:
+                    camera_id = int(camera_id_str)
+                    if save_locally:
+                        self._save_locally(image_data, camera_id, "stereo")
+                    snapshots[camera_id] = image_data
+                except (ValueError, TypeError):
+                    continue  # skip malformed IDs
+
+            return snapshots
+
+        except requests.RequestException as e:
+            raise SnapshotError(f"Failed to take stereo snapshots: {e}")
+
+
+    def _save_locally(self, snapshot_data: str, camera_id: int, dirname: Optional[str] = None):
+        """Save snapshot data locally inside 'snapshots/dirname' folder (or just 'snapshots' if dirname is None)."""
         try:
             if snapshot_data:
-                # Decode base64 image data
-                image_data = base64.b64decode(snapshot_data)
-                
-                # Determine save path
-                if local_path:
-                    save_path = Path(local_path)
-                else:
-                    save_path = Path.cwd() / "snapshots"
-                
-                save_path.mkdir(exist_ok=True)
-                
-                # Generate filename
+                # Rimuovi prefisso data URL se presente
+                if snapshot_data.startswith("data:"):
+                    snapshot_data = snapshot_data.split(",", 1)[1]
+
+                # Decodifica base64 con validazione
+                image_data = base64.b64decode(snapshot_data, validate=True)
+
+                # Apri immagine con PIL per determinare formato
+                image = Image.open(io.BytesIO(image_data))
+                image_format = image.format.lower()
+
+                # Base path: current working dir + 'snapshots' + optional dirname
+                base_path = Path.cwd() / "snapshots"
+                if dirname:
+                    base_path = base_path / dirname
+                base_path.mkdir(parents=True, exist_ok=True)
+
+                # Crea filename con timestamp e formato corretto
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                filename = f"camera_{camera_id}_{timestamp}.jpg"
-                file_path = save_path / filename
-                
-                # Save image
-                with open(file_path, 'wb') as f:
-                    f.write(image_data)
-                
+                filename = f"camera_{camera_id}_{timestamp}.{image_format}"
+                file_path = base_path / filename
+
+                # Salva immagine
+                image.save(file_path)
+
                 print(f"Snapshot saved locally: {file_path}")
-                
+
         except Exception as e:
             print(f"Failed to save snapshot locally: {e}")
-    
+
+
     
     def download_snapshot(self, snapshot_path: str, local_path: Optional[str] = None) -> str:
         """
@@ -253,9 +273,15 @@ if __name__ == "__main__":
     try:
         client = SnapshotClient()
         print("✓ Connected to snapshot server")
-        
 
         client.take_snapshot(1)
+        print("✓ Taken first snapshot")
+
+        client.take_all_snapshots()
+        print("✓ Taken all snapshots")
+
+        client.take_snapshot_stereo()
+        print("✓ Taken stereo snapshot")
         
     except SnapshotError as e:
         print(f"✗ Snapshot client error: {e}")
