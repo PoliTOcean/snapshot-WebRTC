@@ -1,14 +1,14 @@
 {
     "janus": {
-        "server": "127.0.0.1",
+        "server": "10.0.0.192",
         "port": 8188,
         "use_ssl": false,
         "websocket_path": "/"
     },
     "snapshots": {
-        "save_to_server": true,
+        "save_to_server": false,
         "save_to_browser": true,
-        "image_quality": 0.95,
+        "image_quality": 1.0,
         "image_format": "jpeg"
     },
     "ui": {
